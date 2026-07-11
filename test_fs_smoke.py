@@ -167,5 +167,36 @@ try:
 except vs.Error:
     check("bad matrix rejected", True)
 
+# ---- gate 8: engine="vulkan" (skipped when no Vulkan device/shaders) ----
+try:
+    vk = core.galosh.Denoise(nclip, engine="vulkan")
+    vp = planes_of(vk)
+    p_vk = [psnr(vp[i], clean[i], 255) for i in range(3)]
+    ok = all(p_vk[i] > p_in[i] + 3.0 for i in range(3))
+    # FP16-storage contract: near-identical output codes vs the CPU engine
+    mad = max(float(np.mean(np.abs(vp[i].astype(np.int32) - op[i].astype(np.int32))))
+              for i in range(3))
+    check("vulkan engine denoises + matches CPU engine", ok and mad < 1.0,
+          f"Y {p_in[0]:.1f}->{p_vk[0]:.1f} dB, max plane MAD vs CPU {mad:.3f} codes")
+
+    vkh = core.galosh.Denoise(two, engine="vulkan", noise="hold")
+    vh0 = planes_of(vkh, 0)
+    check("vulkan hold frame0 == vulkan fit frame0",
+          all((vh0[i] == vp[i]).all() for i in range(3)))
+
+    # informational speed probe (fit vs hold, this device)
+    import time
+    perf = clip_from_planes(noisy, 8, sub=True)
+    for tag, kw in [("fit", {}), ("hold", {"noise": "hold"})]:
+        c8 = core.std.Loop(perf, 9)
+        dn = core.galosh.Denoise(c8, engine="vulkan", **kw)
+        dn.get_frame(0)
+        t0 = time.perf_counter()
+        for f in dn.frames(): pass
+        print(f"[info] vulkan {tag}: {(time.perf_counter()-t0)/9*1000:.1f} ms/frame "
+              f"({W}x{H} 420P8)")
+except vs.Error as e:
+    print(f"[SKIP] vulkan engine unavailable: {e}")
+
 print("\n" + ("ALL PASS" if fails == 0 else f"{fails} FAILURE(S)"))
 sys.exit(1 if fails else 0)

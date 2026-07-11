@@ -107,14 +107,37 @@ python test_fs_smoke.py       # VapourSynth: 6 gates incl. byte-identity
 - `test_avs_smoke.c` — AviSynth+ script-level run via the C API (flat
   gray + AddGrainC → MAD must drop; no external runner needed).
 
+## Engines
+
+- `engine="cpu"` (default): the canonical reference implementation —
+  output byte-identical to `galosh_yuv_cpu.exe`, the strongest possible
+  plugin ⇔ paper correspondence. ~0.24 s/frame at SD, ~1 s at 1080p.
+- `engine="vulkan"`: the GALOSH Vulkan engine (FP16 inter-phase storage,
+  FP32 compute) embedded from the same submodule. Not bit-identical to
+  the CPU engine (measured max plane MAD 0.12 of an 8-bit code — visually
+  identical), massively faster. Requires a Vulkan 1.2 device and the
+  `shaders/` directory next to the DLL (built by `build_frameserver.sh`);
+  pick a GPU with `GALOSH_VK_DEVICE=NVIDIA` (name substring or index).
+
+Measured through VapourSynth on an RTX 4070 Ti (ms/frame, YUV420P8):
+
+| engine / noise | SD 720×480 | 1080p |
+|---|---|---|
+| vulkan + hold | **6.9 (144 fps)** | **33 (30 fps)** |
+| vulkan + fit | 25 (41 fps) | 111 (9 fps) |
+| cpu + fit | 238 (4.2 fps) | 1005 (1.0 fps) |
+
+`hold` is where video encodes live: the blind fit is reused across
+frames, so the exact-median noise estimators (the most expensive kernels)
+run only on the first frame.
+
 ## Known limitations (v0)
 
-- CPU engine (~0.3 s/frame at 1080p on a desktop CPU). A Vulkan backend
-  (2.6 ms/frame at 1080p in the engine's video mode) is a planned
-  follow-up.
 - 4:2:2 not yet accepted natively — convert to 4:4:4 first.
 - Frame props (`_Matrix` / `_ColorRange` / `_ChromaLocation`) are not read
   yet; colorimetry is explicit-argument only.
+- The dual (AviSynth-enabled) build imports `AviSynth.dll`; on machines
+  without AviSynth+ the build script produces a pure-VapourSynth DLL.
 
 ## License
 

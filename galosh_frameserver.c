@@ -59,6 +59,8 @@ static SRWLOCK g_galosh_proc_lock = SRWLOCK_INIT;
 /* ================================================================
  * Host-agnostic core
  * ================================================================ */
+#include "galosh_fs_vk.h"   /* narrow API of the Vulkan engine TU */
+
 typedef struct
 {
   float luma, chroma;
@@ -67,9 +69,13 @@ typedef struct
   galosh420_eotf_t   eotf;
   galosh420_siting_t siting;
   int   noise_hold;                    /* 0 = fit per frame, 1 = hold */
+  int   engine;                        /* 0 = cpu (byte-identical to the
+                                        * reference exe), 1 = vulkan
+                                        * (FP16-storage GPU engine) */
   /* held blind fit (guarded by host-serialized frame processing) */
   int   have_l, have_c;
   float l_a, l_s2, c_a, c_s2;
+  galosh_fsvk_state vk_l, vk_c;        /* vulkan-engine noise state */
 } galosh_fs;
 
 /* Read a (possibly strided) integer plane into a contiguous float array of
@@ -148,6 +154,52 @@ static int fs_process(galosh_fs *p,
   {
     Cb[i] = galosh420_dequant_c(Cb[i], depth, p->range);
     Cr[i] = galosh420_dequant_c(Cr[i], depth, p->range);
+  }
+
+  /* ---- ENGINE: vulkan (FP16-storage GPU; opt-in) ---- */
+  if(p->engine == 1)
+  {
+    /* reuse Ylin/Yden/Yg as the gamma-domain output planes */
+    if(!p->noise_hold) { p->vk_l.valid = 0; p->vk_c.valid = 0; }
+    const int rc = galosh_fsvk_process(Yp, Cb, Cr, W, H, cw, ch, subsampled,
+                                       p->mat, p->eotf, p->siting,
+                                       p->luma, p->chroma,
+                                       Yden /* gamma Y' out */,
+                                       Yg   /* gamma Cb out */,
+                                       yint /* gamma Cr out */,
+                                       &p->vk_l, &p->vk_c);
+    if(rc)
+    {
+      fprintf(stderr, "[galosh_fs] vulkan engine failed\n");
+      goto vk_fail;
+    }
+    DT_OMP_FOR()
+    for(int y = 0; y < H; y++)
+      for(int x = 0; x < W; x++)
+        fs_store_code(dY, dtY, W, y, wide, x,
+                      galosh420_requant_y(Yden[(size_t)y * W + x],
+                                          depth, p->range));
+    DT_OMP_FOR()
+    for(int y = 0; y < ch; y++)
+      for(int x = 0; x < cw; x++)
+      {
+        const size_t i = (size_t)y * cw + x;
+        fs_store_code(dU, dtU, cw, y, wide, x,
+                      galosh420_requant_c(Yg[i], depth, p->range));
+        fs_store_code(dV, dtV, cw, y, wide, x,
+                      galosh420_requant_c(yint[i], depth, p->range));
+      }
+    dt_free_align(Yp);   dt_free_align(Cb);  dt_free_align(Cr);
+    dt_free_align(Ylin); dt_free_align(Yden);
+    dt_free_align(Yg);   dt_free_align(rgb); dt_free_align(yint);
+    ReleaseSRWLockExclusive(&g_galosh_proc_lock);
+    return 0;
+  vk_fail:
+    dt_free_align(Yp);   dt_free_align(Cb);  dt_free_align(Cr);
+    dt_free_align(Ylin); dt_free_align(Yden);
+    dt_free_align(Yg);   dt_free_align(rgb); dt_free_align(yint);
+    ReleaseSRWLockExclusive(&g_galosh_proc_lock);
+    return 1;
   }
 
   /* ---- LUMA (full res, chroma-independent) ---- */
@@ -239,14 +291,26 @@ static int fs_process(galosh_fs *p,
 static int fs_parse_args(galosh_fs *p,
                          const char *matrix, const char *range,
                          const char *eotf, const char *siting,
-                         const char *noise, char *errbuf, size_t errlen)
+                         const char *noise, const char *engine,
+                         char *errbuf, size_t errlen)
 {
   p->mat = GALOSH420_MAT_BT709;
   p->range = GALOSH420_RANGE_LIMITED;
   p->eotf = GALOSH420_EOTF_BT709;
   p->siting = GALOSH420_SITING_LEFT;
   p->noise_hold = 0;
+  p->engine = 0;
   p->have_l = p->have_c = 0;
+  p->vk_l.valid = p->vk_c.valid = 0;
+  if(engine)
+  {
+    if(strcmp(engine, "cpu") == 0)         p->engine = 0;
+    else if(strcmp(engine, "vulkan") == 0) p->engine = 1;
+    else { snprintf(errbuf, errlen, "bad engine '%s' (cpu|vulkan)", engine); return 1; }
+    if(p->engine == 1 && galosh_fsvk_init())
+    { snprintf(errbuf, errlen, "engine 'vulkan' unavailable (no Vulkan device "
+               "or missing shaders/ next to the DLL)"); return 1; }
+  }
   if(matrix && galosh420_parse_matrix(matrix, &p->mat))
   { snprintf(errbuf, errlen, "bad matrix '%s' (bt601|bt709|bt2020|custom:Kr,Kb)", matrix); return 1; }
   if(range && galosh420_parse_range(range, &p->range))
@@ -353,7 +417,8 @@ static void VS_CC vs_create(const VSMap *in, VSMap *out, void *userData,
   const char *eotf   = vsapi->mapGetData(in, "eotf",   0, &err); if(err) eotf   = NULL;
   const char *siting = vsapi->mapGetData(in, "siting", 0, &err); if(err) siting = NULL;
   const char *noise  = vsapi->mapGetData(in, "noise",  0, &err); if(err) noise  = NULL;
-  if(fs_parse_args(&d->p, matrix, range, eotf, siting, noise, ebuf, sizeof(ebuf)))
+  const char *engine = vsapi->mapGetData(in, "engine", 0, &err); if(err) engine = NULL;
+  if(fs_parse_args(&d->p, matrix, range, eotf, siting, noise, engine, ebuf, sizeof(ebuf)))
   {
     char msg[300];
     snprintf(msg, sizeof(msg), "galosh.Denoise: %s", ebuf);
@@ -381,7 +446,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin,
   vspapi->registerFunction("Denoise",
       "clip:vnode;luma:float:opt;chroma:float:opt;"
       "matrix:data:opt;range:data:opt;eotf:data:opt;"
-      "siting:data:opt;noise:data:opt;",
+      "siting:data:opt;noise:data:opt;engine:data:opt;",
       "clip:vnode;", vs_create, NULL, plugin);
 }
 
@@ -461,7 +526,8 @@ static AVS_Value AVSC_CC avs_create_denoise(AVS_ScriptEnvironment *env,
   const char *eotf   = avs_defined(avs_array_elt(args, 5)) ? avs_as_string(avs_array_elt(args, 5)) : NULL;
   const char *siting = avs_defined(avs_array_elt(args, 6)) ? avs_as_string(avs_array_elt(args, 6)) : NULL;
   const char *noise  = avs_defined(avs_array_elt(args, 7)) ? avs_as_string(avs_array_elt(args, 7)) : NULL;
-  if(fs_parse_args(&d->p, matrix, range, eotf, siting, noise, ebuf, sizeof(ebuf)))
+  const char *engine = avs_defined(avs_array_elt(args, 8)) ? avs_as_string(avs_array_elt(args, 8)) : NULL;
+  if(fs_parse_args(&d->p, matrix, range, eotf, siting, noise, engine, ebuf, sizeof(ebuf)))
   {
     avs_release_clip(clip);
     free(d);
@@ -481,7 +547,7 @@ static AVS_Value AVSC_CC avs_create_denoise(AVS_ScriptEnvironment *env,
 const char *AVSC_CC avisynth_c_plugin_init(AVS_ScriptEnvironment *env)
 {
   avs_add_function(env, "galosh_Denoise",
-      "c[luma]f[chroma]f[matrix]s[range]s[eotf]s[siting]s[noise]s",
+      "c[luma]f[chroma]f[matrix]s[range]s[eotf]s[siting]s[noise]s[engine]s",
       avs_create_denoise, NULL);
   return "GALOSH blind training-free denoiser (single-frame)";
 }
