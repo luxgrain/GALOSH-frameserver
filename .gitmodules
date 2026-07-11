@@ -1,0 +1,3 @@
+[submodule "extern/GALOSH"]
+	path = extern/GALOSH
+	url = https://github.com/luxgrain/GALOSH.git

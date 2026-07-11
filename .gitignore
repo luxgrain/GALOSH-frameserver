@@ -1,0 +1,6 @@
+# build artifacts + fetched third-party headers (GPL-with-exception —
+# fetched at build time, deliberately not vendored; see README.md)
+*.dll
+*.exe
+*.avs
+include_avs/
