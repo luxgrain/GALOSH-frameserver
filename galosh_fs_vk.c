@@ -130,6 +130,12 @@ int galosh_fsvk_init(void)
   const char *logf = getenv("GALOSH_FS_LOG");
   if(logf && logf[0]) freopen(logf, "a", stderr);
   fsvk_set_module_dir();
+  /* shader dir override for autoload layouts (DLL copied into a host
+   * plugins dir): GALOSH_SHADER_DIR may point at the directory that
+   * contains the .spv files (flat) or a dir containing shaders/. */
+  { const char *sd = getenv("GALOSH_SHADER_DIR");
+    if(sd && sd[0]) { strncpy(g_exe_dir, sd, sizeof(g_exe_dir) - 1);
+                      g_exe_dir[sizeof(g_exe_dir) - 1] = 0; } }
   g_vk_quiet = 1;                 /* no per-frame spam inside host apps */
   g_verbose = getenv("GALOSH_VERBOSE") != NULL;
   g_vk_fail_hook = fsvk_fail;     /* NEVER exit() the host */
