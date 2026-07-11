@@ -18,7 +18,34 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <setjmp.h>
 #include "galosh_fs_vk.h"
+
+/* ================================================================
+ * Host-crash hardening (field report: engine="vulkan" took down
+ * avspmod).  Two independent fixes:
+ *  1. init is now thread-safe: AviSynth+ MT mode 2 creates filter
+ *     instances CONCURRENTLY on worker threads; the old check-then-act
+ *     one-shot raced into double vkCreateInstance.
+ *  2. any Vulkan error longjmps back here (g_vk_fail_hook) instead of
+ *     exit(1)-ing the host; the engine is then latched dead and every
+ *     later frame returns a clean error.
+ * Diagnostics: set GALOSH_FS_LOG=<file> to append the engine's stderr
+ * chatter (GUI hosts swallow stderr).
+ * (日) init 競合と exit(1) の両方を潰す。GUI ホスト向けログも追加。
+ * ================================================================ */
+static SRWLOCK g_fsvk_init_lock = SRWLOCK_INIT;
+static jmp_buf g_fsvk_jmp;
+static volatile LONG g_fsvk_dead = 0;
+
+static void fsvk_fail(int vkres)
+{
+  InterlockedExchange(&g_fsvk_dead, 1);
+  fprintf(stderr, "[galosh_fs] vulkan failure latched (VkResult %d) — "
+                  "engine disabled for this process\n", vkres);
+  fflush(stderr);
+  longjmp(g_fsvk_jmp, vkres ? vkres : 1);
+}
 
 /* DLL-local module directory -> g_exe_dir so load_spv() finds
  * "<dll dir>/shaders/*.spv" (the CLI derives this from argv[0]). */
@@ -93,13 +120,34 @@ static inline float fsvk_c01(float x)
 int galosh_fsvk_init(void)
 {
   static int tried = 0, ok = 0;
-  if(tried) return ok ? 0 : 1;
+  AcquireSRWLockExclusive(&g_fsvk_init_lock);   /* MT-safe one-shot */
+  if(tried)
+  {
+    ReleaseSRWLockExclusive(&g_fsvk_init_lock);
+    return ok ? 0 : 1;
+  }
   tried = 1;
+  const char *logf = getenv("GALOSH_FS_LOG");
+  if(logf && logf[0]) freopen(logf, "a", stderr);
   fsvk_set_module_dir();
   g_vk_quiet = 1;                 /* no per-frame spam inside host apps */
   g_verbose = getenv("GALOSH_VERBOSE") != NULL;
-  if(galosh_yuv_vk_init_device()) return 1;
+  g_vk_fail_hook = fsvk_fail;     /* NEVER exit() the host */
+  if(setjmp(g_fsvk_jmp))
+  {
+    ReleaseSRWLockExclusive(&g_fsvk_init_lock);
+    return 1;                     /* device init failed mid-way */
+  }
+  fprintf(stderr, "[galosh_fs] vulkan init (dll dir: %s)\n", g_exe_dir);
+  fflush(stderr);
+  if(galosh_yuv_vk_init_device())
+  {
+    ReleaseSRWLockExclusive(&g_fsvk_init_lock);
+    return 1;
+  }
+  fflush(stderr);
   ok = 1;
+  ReleaseSRWLockExclusive(&g_fsvk_init_lock);
   return 0;
 }
 
@@ -113,7 +161,10 @@ int galosh_fsvk_process(const float *Yp, const float *Cb, const float *Cr,
 {
   const size_t ysz = (size_t)W * H;
   const size_t csz = (size_t)cw * ch;
-  (void)siting;
+  if(g_fsvk_dead) return 1;         /* engine latched off after a VK error */
+  if(setjmp(g_fsvk_jmp)) return 1;  /* recover here instead of exit(1)
+                                     * (leaks the frame's host buffers —
+                                     * acceptable on a dead device) */
 
   /* ---- LUMA: full-res gray image, luma-only fast path ---- */
   float *gray = (float *)malloc(ysz * 3 * 4);
