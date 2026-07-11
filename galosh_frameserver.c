@@ -39,6 +39,24 @@
 #include "extern/GALOSH/standalone/galosh_yuv_cpu.c"
 
 /* ================================================================
+ * Process-wide serialization (BUGFIX 2026-07-11).
+ *
+ * EN: The embedded canonical pipeline keeps the inverse-GAT LUT (and its
+ *     per-frame rebuild) in GLOBALS — harmless in the single-image exe,
+ *     but two concurrently-processing FILTER INSTANCES (settings-
+ *     comparison scripts, previewers with parallel requests) rebuild the
+ *     LUT under each other's frames; the OpenMP row loops then read a
+ *     half-swapped table → horizontal garbage bands.  fmUnordered / AVS
+ *     MT flags only serialize WITHIN one instance, so frame processing
+ *     takes a process-wide lock.  Throughput cost ~0: each frame already
+ *     saturates every core via the internal OpenMP parallelism.
+ * JP: 正規実装の逆 GAT LUT はグローバル（単一画像 exe では無害）。複数
+ *     インスタンス並行で帯状破壊 → プロセス全域ロックで直列化。フレーム
+ *     内部が OpenMP 全コア並列なので性能損失は実質ゼロ。
+ * ================================================================ */
+static SRWLOCK g_galosh_proc_lock = SRWLOCK_INIT;
+
+/* ================================================================
  * Host-agnostic core
  * ================================================================ */
 typedef struct
@@ -100,6 +118,9 @@ static int fs_process(galosh_fs *p,
   const size_t ysz = (size_t)W * H;
   const size_t csz = (size_t)cw * ch;
 
+  /* serialize ALL instances in the process (see g_galosh_proc_lock) */
+  AcquireSRWLockExclusive(&g_galosh_proc_lock);
+
   float *Yp   = dt_alloc_align_float(ysz);
   float *Cb   = dt_alloc_align_float(csz);
   float *Cr   = dt_alloc_align_float(csz);
@@ -109,7 +130,11 @@ static int fs_process(galosh_fs *p,
   float *rgb  = dt_alloc_align_float(csz * 3);
   float *yint = dt_alloc_align_float(csz);
   if(!Yp || !Cb || !Cr || !Ylin || !Yden || !Yg || !rgb || !yint)
-  { fprintf(stderr, "[galosh_fs] alloc failed\n"); return 1; }
+  {
+    fprintf(stderr, "[galosh_fs] alloc failed\n");
+    ReleaseSRWLockExclusive(&g_galosh_proc_lock);
+    return 1;
+  }
 
   /* ---- load + dequantise (gamma-domain container values) ---- */
   fs_load_plane(sY, stY, W, H, wide, Yp);
@@ -206,6 +231,7 @@ static int fs_process(galosh_fs *p,
   dt_free_align(Yp);   dt_free_align(Cb);  dt_free_align(Cr);
   dt_free_align(Ylin); dt_free_align(Yden);
   dt_free_align(Yg);   dt_free_align(rgb); dt_free_align(yint);
+  ReleaseSRWLockExclusive(&g_galosh_proc_lock);
   return 0;
 }
 

@@ -140,7 +140,27 @@ check("hold frame1 denoises with held model",
       all(p1[i] > p1n[i] + 3.0 for i in range(3)),
       f"Y {p1n[0]:.1f}->{p1[0]:.1f} dB")
 
-# ---- gate 6: bad-arg rejection ----
+# ---- gate 6: multi-instance concurrency (global-LUT race regression) ----
+# Two filter instances + prefetch forces VapourSynth to schedule them on
+# parallel threads; without the process-wide lock the embedded pipeline's
+# global inverse-GAT LUT is rebuilt mid-frame by the other instance
+# (horizontal garbage bands, 2026-07-11 field report). Every interleaved
+# frame must equal its single-instance reference.
+refB = planes_of(core.galosh.Denoise(clip_from_planes(n2, 8, sub=True),
+                                     chroma=1.3))
+la = core.galosh.Denoise(core.std.Loop(clip_from_planes(noisy, 8, sub=True), 8))
+lb = core.galosh.Denoise(core.std.Loop(clip_from_planes(n2, 8, sub=True), 8),
+                         chroma=1.3)
+inter = core.std.Interleave([la, lb])
+race_ok = True
+for i, f in enumerate(inter.frames(prefetch=8, backlog=16)):
+    ref = op if i % 2 == 0 else refB
+    if not all(np.array_equal(np.asarray(f[pl]), ref[pl]) for pl in range(3)):
+        race_ok = False
+        break
+check("parallel multi-instance == single-instance (16 frames)", race_ok)
+
+# ---- gate 7: bad-arg rejection ----
 try:
     core.galosh.Denoise(nclip, matrix="bt2021")
     check("bad matrix rejected", False)
