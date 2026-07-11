@@ -4,3 +4,4 @@
 *.exe
 *.avs
 include_avs/
+_dist/
