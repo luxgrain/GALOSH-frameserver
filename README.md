@@ -59,8 +59,10 @@ galosh_Denoise(matrix="bt2020", eotf="hlg", siting="topleft")
 - Formats: integer YUV420 / YUV444, 8–16 bit (convert other formats first).
 - `matrix` = `bt601|bt709|bt2020|custom:Kr,Kb` · `range` = `limited|full` ·
   `eotf` = `srgb|g22|g24|bt709|hlg|pq|linear` ·
-  `siting` = `center|left|topleft` (chroma sample-center position).
-  Defaults are the video conventions: bt709 / limited / bt709 / left.
+  `siting` = `center|left|topleft` (chroma sample-center position;
+  4:2:0 only — ignored for 4:4:4, where chroma is co-sited with luma by
+  definition). Defaults are the video conventions: bt709 / limited /
+  bt709 / left.
 - `noise` = `fit`: blind Poisson–Gaussian fit per frame (deterministic).
   `noise` = `hold`: fit once on the first frame this instance processes,
   reuse for the rest — intended for linear encodes (with heavy seeking the
