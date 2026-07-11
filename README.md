@@ -19,17 +19,41 @@ machine-checked.
 VapourSynth:
 
 ```python
+import vapoursynth as vs
+core = vs.core
 core.std.LoadPlugin(path="galosh_frameserver.dll")
-clip = core.galosh.Denoise(clip, luma=1.0, chroma=1.0,
+
+clip = core.lsmas.LWLibavSource("input.mkv")     # any planar YUV420/444 source
+clip = core.galosh.Denoise(clip, luma=1.0, chroma=1.2,
                            matrix="bt709", range="limited",
-                           eotf="bt709", siting="left", noise="fit")
+                           eotf="bt709", siting="left", noise="hold")
+clip.set_output()
 ```
 
-AviSynth+ (same DLL):
+AviSynth+ (same DLL, same arguments):
 
 ```avs
 LoadPlugin("galosh_frameserver.dll")
-galosh_Denoise(luma=1.0, chroma=1.0, matrix="bt709", range="limited")
+
+LWLibavVideoSource("input.mkv")                  # any planar YUV420/444 source
+galosh_Denoise(luma=1.0, chroma=1.2, \
+               matrix="bt709", range="limited", \
+               eotf="bt709", siting="left", noise="hold")
+```
+
+Minimal forms — every argument is optional (defaults shown below):
+
+```avs
+galosh_Denoise()                        # AviSynth+: fully blind, bt709/limited
+```
+```python
+clip = core.galosh.Denoise(clip)        # VapourSynth: same
+```
+
+High-bit-depth / other colorimetry, e.g. 10-bit HLG broadcast material:
+
+```avs
+galosh_Denoise(matrix="bt2020", eotf="hlg", siting="topleft")
 ```
 
 - Formats: integer YUV420 / YUV444, 8–16 bit (convert other formats first).
