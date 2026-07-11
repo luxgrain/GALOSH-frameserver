@@ -328,6 +328,27 @@ static int fs_parse_args(galosh_fs *p,
   return 0;
 }
 
+
+/* ================================================================
+ * Self-pin: hosts like avspmod destroy the script environment (and
+ * FreeLibrary this plugin) on every re-evaluation — potentially while
+ * the statically-linked OpenMP worker pool or the Vulkan device still
+ * reference code inside this DLL.  Unloading then crashes the host.
+ * Pinning makes FreeLibrary a no-op for this module (it stays until
+ * process exit — the standard practice for plugins with background
+ * threads).  (日) 自己ピン留めでアンロード起因のホストクラッシュを根絶。
+ * ================================================================ */
+static void galosh_fs_pin_module(void)
+{
+  static int pinned = 0;
+  if(pinned) return;
+  HMODULE hm = NULL;
+  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                     GET_MODULE_HANDLE_EX_FLAG_PIN,
+                     (LPCSTR)&galosh_fs_pin_module, &hm);
+  pinned = 1;
+}
+
 /* ================================================================
  * VapourSynth (API 4) wrapper
  * ================================================================ */
@@ -440,6 +461,7 @@ static void VS_CC vs_create(const VSMap *in, VSMap *out, void *userData,
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin,
                                              const VSPLUGINAPI *vspapi)
 {
+  galosh_fs_pin_module();
   vspapi->configPlugin("com.luxgrain.galosh", "galosh",
                        "GALOSH blind training-free denoiser (single-frame)",
                        VS_MAKE_VERSION(0, 4), VAPOURSYNTH_API_VERSION, 0, plugin);
@@ -546,6 +568,7 @@ static AVS_Value AVSC_CC avs_create_denoise(AVS_ScriptEnvironment *env,
 
 const char *AVSC_CC avisynth_c_plugin_init(AVS_ScriptEnvironment *env)
 {
+  galosh_fs_pin_module();
   avs_add_function(env, "galosh_Denoise",
       "c[luma]f[chroma]f[matrix]s[range]s[eotf]s[siting]s[noise]s[engine]s",
       avs_create_denoise, NULL);
