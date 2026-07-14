@@ -209,9 +209,13 @@ int galosh_fsvk_process(const float *Yp, const float *Cb, const float *Cr,
     rgb[3 * i + 1] = fsvk_lut_eval(g_fsvk_lut.to_srgb, G);
     rgb[3 * i + 2] = fsvk_lut_eval(g_fsvk_lut.to_srgb, B);
   }
+  /* [GALOSH-420 2026-07-12] noise-adaptive chroma radius only for the native
+   * half-res 4:2:0 chroma pass (subsampled); 444 chroma is full-res -> R=7. */
+  g_vk_yuv420_halfres = subsampled ? 1 : 0;
   if(run_core(rgb, cw, ch, luma, chroma, /*luma_only=*/0, "",
               (galosh_vk_memstate *)mc))
-  { free(Yg); free(rgb); return 1; }
+  { g_vk_yuv420_halfres = 0; free(Yg); free(rgb); return 1; }
+  g_vk_yuv420_halfres = 0;
   #pragma omp parallel for schedule(static)
   for(long long i = 0; i < (long long)csz; i++)
   {

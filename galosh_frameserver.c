@@ -248,8 +248,12 @@ static int fs_process(galosh_fs *p,
     p->c_a  = fmaxf(s * 0.1f, 1e-5f);
     p->have_c = 1;
   }
+  /* [GALOSH-420 2026-07-12] noise-adaptive chroma radius on the native
+   * half-res 4:2:0 lattice (subsampled); 444 chroma is full-res -> R=7. */
+  g_yuv420_halfres_chroma = subsampled ? 1 : 0;
   galosh_yuv_denoise_linear_rgb(rgb, rgb, cw, ch, p->luma, p->chroma,
                                 p->c_a, p->c_s2);
+  g_yuv420_halfres_chroma = 0;
 
   /* ---- requantise + store (format-preserving; same clips as the exe) --- */
   const int hi = (1 << depth) - 1;
