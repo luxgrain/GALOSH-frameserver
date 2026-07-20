@@ -45,7 +45,10 @@ fi
 # builds and engine="cpu" works, engine="vulkan" errors at filter create).
 VK_SHADERS="yuv_srgb2ycc yuv_ycc2srgb yuv_lap_mad yuv_lap_mad_h16 \
 yuv_synth_alpha yuv_gat_fwd yuv_sigma_norm yuv_sigma_denorm yuv_makitalo \
-yuv_loess o32_build_inv_lut o32_lut_finalize o32_pass12 o32_pass12_sg"
+yuv_loess o32_build_inv_lut o32_lut_finalize o32_pass12 o32_pass12_sg \
+yuv_env_block_stats yuv_env_dark_thresh_hist yuv_env_dark_lap_hist \
+yuv_env_select o32_ne_finalize o32_ne_dark_thresh_finalize \
+o32_ne_dark_finalize"
 if command -v glslc >/dev/null 2>&1; then
   mkdir -p shaders
   for k in $VK_SHADERS; do

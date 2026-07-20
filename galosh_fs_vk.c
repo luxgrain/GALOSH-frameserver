@@ -71,11 +71,20 @@ static void fsvk_set_module_dir(void)
  *     time (measured 63 ms of a 126 ms 1080p frame), so the composites
  *     are tabulated once (16384 knots + linear interpolation, domain
  *     [-0.25, 1.25] to cover dequant excursions; endpoints clamp).
- *     Curve error ~1e-6 — far below one 16-bit code.  The gray-image
- *     variant (inner [0,1] clip) equals the unclipped composite
- *     evaluated on clamp01(x) because both curves are monotone.
+ *     Curve error ~1e-6 — far below one 16-bit code.
+ *     [2026-07-19 PARITY FIX] to_srgb now tabulates the NON-clipping
+ *     composite (vk420_lin_to_srgb_noclip from the embedded vk host):
+ *     the old galosh420_eotf_fwd_f(SRGB) composite baked its [0,1] clip
+ *     into the LUT, destroying sub-black/super-white noise excursions
+ *     that the CPU engine preserves — the blind σ on dark noisy frames
+ *     collapsed (0.0266→0.0142 measured) and the chroma lane
+ *     under-denoised (bug present since the v0.4.0 420 GPU port).
+ *     Residual endpoint clamp at ±0.25 outside [0,1] remains (domain
+ *     edge, statistically negligible vs the full [0,1] clip).
  * JP: 4 本のホスト変換ループの合成カーブを 1 次元 LUT 化（powf 撲滅）。
- *     単調性により内側クリップ版は引数クランプで等価。
+ *     to_srgb は非クリップ合成に修正 (旧 LUT はクリップ焼き込みで
+ *     excursion 全滅 = CPU と乖離、v0.4.0 以来のバグ)。±0.25 の
+ *     ドメイン端クランプのみ残存（実害無視可）。
  * ================================================================ */
 #define FSVK_LUT_N 16384
 static struct
@@ -96,7 +105,7 @@ static void fsvk_lut_build(const galosh420_eotf_t eotf)
   {
     const float x = g_fsvk_lut.lo + (float)i / g_fsvk_lut.scale;
     g_fsvk_lut.to_srgb[i] =
-        galosh420_eotf_fwd_f(galosh420_eotf_inv_f(x, eotf), GALOSH420_EOTF_SRGB);
+        vk420_lin_to_srgb_noclip(galosh420_eotf_inv_f(x, eotf));
     g_fsvk_lut.from_srgb[i] =
         galosh420_eotf_fwd_f(galosh420_eotf_inv_f(x, GALOSH420_EOTF_SRGB), eotf);
   }
@@ -179,7 +188,9 @@ int galosh_fsvk_process(const float *Yp, const float *Cb, const float *Cr,
   #pragma omp parallel for schedule(static)
   for(long long i = 0; i < (long long)ysz; i++)
   {
-    const float v = fsvk_lut_eval(g_fsvk_lut.to_srgb, fsvk_c01(Yp[i]));
+    /* [2026-07-19 PARITY FIX] no input clamp — the CPU engine feeds the
+     * core unclamped; the LUT domain covers dequant excursions. */
+    const float v = fsvk_lut_eval(g_fsvk_lut.to_srgb, Yp[i]);
     gray[3 * i + 0] = v; gray[3 * i + 1] = v; gray[3 * i + 2] = v;
   }
   if(run_core(gray, W, H, luma, chroma, /*luma_only=*/1, "",

@@ -206,13 +206,20 @@ static int fs_process(galosh_fs *p,
   DT_OMP_FOR()
   for(size_t i = 0; i < ysz; i++)
     Ylin[i] = galosh420_eotf_inv_f(Yp[i], p->eotf);
-  /* blind fit hoisted from galosh_yuv_denoise_luma_plane (same formulas,
-   * same estimator, same buffer) so `hold` can cache the scalars. */
+  /* blind fit hoisted from galosh_yuv_denoise_luma_plane (same estimator,
+   * same buffer) so `hold` can cache the scalars.
+   * [2026-07-19 ENVELOPE] routed through the core's shared switch
+   * blind_alpha_sigma (same TU — galosh_yuv_cpu.c is #included above):
+   * default = single-plane lower-envelope estimator (canonical since
+   * 2026-07-19; ablation +0.39 dB / −0.056 LPIPS vs MAD), automatic MAD
+   * fallback on degenerate fits, GALOSH_YUV_NOISE_EST=mad escape hatch.
+   * The previous inline MAD formulas silently pinned this DLL to the
+   * legacy estimator even after the core switched. */
   if(!(p->noise_hold && p->have_l))
   {
-    const float s = estimate_sigma_plane(Ylin, W, H);
-    p->l_s2 = fmaxf(s * s, 1e-8f);
-    p->l_a  = fmaxf(s * 0.1f, 1e-5f);
+    float a = 0.0f, s2 = 0.0f;
+    blind_alpha_sigma(Ylin, W, H, "galosh_fs_luma", &a, &s2);
+    p->l_a = a; p->l_s2 = s2;
     p->have_l = 1;
   }
   galosh_yuv_denoise_luma_plane(Ylin, Yden, W, H, p->luma, p->l_a, p->l_s2);
@@ -243,9 +250,10 @@ static int fs_process(galosh_fs *p,
                    &Y, &cb2, &cr2);
       yint[i] = Y;
     }
-    const float s = estimate_sigma_plane(yint, cw, ch);
-    p->c_s2 = fmaxf(s * s, 1e-8f);
-    p->c_a  = fmaxf(s * 0.1f, 1e-5f);
+    /* [2026-07-19 ENVELOPE] shared switch — see the luma fit above. */
+    float a = 0.0f, s2 = 0.0f;
+    blind_alpha_sigma(yint, cw, ch, "galosh_fs_chroma", &a, &s2);
+    p->c_a = a; p->c_s2 = s2;
     p->have_c = 1;
   }
   /* [GALOSH-420 2026-07-12] noise-adaptive chroma radius on the native
